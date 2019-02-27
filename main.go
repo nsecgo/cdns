@@ -4,7 +4,7 @@ import (
 	"flag"
 	"github.com/miekg/dns"
 	"github.com/nsecgo/cdns/googleDOH"
-	"github.com/nsecgo/cdns/util"
+	"github.com/oschwald/maxminddb-golang"
 	"github.com/patrickmn/go-cache"
 	"log"
 	"net"
@@ -13,34 +13,42 @@ import (
 	"time"
 )
 
+type geoIpRecord struct {
+	Country struct {
+		ISOCode string `maxminddb:"iso_code"`
+	} `maxminddb:"country"`
+}
+
 var (
-	client      dns.Client
+	geoIpReader *maxminddb.Reader
+	lClient     = dns.Client{SingleInflight: true}
+	rClient     = dns.Client{SingleInflight: true}
 	httpClient  = &http.Client{}
-	chinaIPList []*net.IPNet
 	mc          = cache.New(5*time.Minute, 10*time.Minute)
-	localDNS    = flag.String("ld", "119.29.29.29:53", "local dns")
+	localDNS    = flag.String("ld", "192.168.1.1:53", "local dns")
 	remoteDNS   = flag.String("rd", "8.8.8.8:53", "remote dns")
 	ecs         = flag.String("ecs", "0.0.0.0/0", "local ip addr")
-	proxy       = flag.String("proxy", "socks5://127.0.0.1:1080", "http,https,socks5 are supported")
-	addr        = flag.String("l", ":53", "listen address")
-	ips         = flag.String("ip", "./china_ip_list.txt", "china ip list")
-	network     = flag.String("net", "tcp", "if 'tcp' or 'tcp-tls' (DNS over TLS) a TCP query will be initiated, otherwise an UDP one")
+	x           = flag.String("x", "socks5://localhost:1080", "only support `socks5` proxy")
+	addr        = flag.String("l", ":5300", "listen address")
+	geoip       = flag.String("geoip", "GeoLite2-Country.mmdb", "geoip-database(https://dev.maxmind.com/geoip/geoip2/geolite2/)")
+	//network     = *flag.String("net", "tcp", "if 'tcp' or 'tcp-tls' (DNS over TLS) a TCP query will be initiated, otherwise an UDP one")
 )
 
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
 	flag.Parse()
 	var err error
-	chinaIPList, err = util.GetIPList(*ips)
+
+	geoIpReader, err = maxminddb.Open(*geoip)
 	if err != nil {
 		log.Fatal(err)
 	}
-	proxyUrl, err := url.Parse(*proxy)
+
+	proxyUrl, err := url.Parse(*x)
 	if err != nil {
 		log.Fatal(err)
 	}
-	client.SingleInflight = true
-	client.Net = *network
+
 	httpClient.Transport = http.DefaultTransport
 	httpClient.Transport.(*http.Transport).MaxIdleConnsPerHost = 20
 	httpClient.Transport.(*http.Transport).Proxy = http.ProxyURL(proxyUrl)
@@ -64,7 +72,7 @@ func handleDnsRequest(w dns.ResponseWriter, req *dns.Msg) {
 			}
 		}
 	} else {
-		resp, _, err = client.Exchange(req, *localDNS)
+		resp, _, err = lClient.Exchange(req, *localDNS)
 	}
 	if err != nil {
 		log.Println(err, "===========>", req.Question[0].String())
@@ -94,10 +102,13 @@ func deliverAny(req *dns.Msg) (resp *dns.Msg, err error) {
 	if ip == nil {
 		return resp, nil
 	}
-	if util.IPListMatch(ip, chinaIPList) {
-		resp, _, err = client.Exchange(req, *localDNS)
-	} else {
-		resp, _, err = client.Exchange(req, *remoteDNS)
+	var record geoIpRecord
+	if geoIpReader.Lookup(ip, &record) == nil {
+		if record.Country.ISOCode == "CN" {
+			resp, _, err = lClient.Exchange(req, *localDNS)
+		} else {
+			resp, _, err = rClient.Exchange(req, *remoteDNS)
+		}
 	}
 	if err != nil {
 		return nil, err
