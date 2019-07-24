@@ -109,7 +109,6 @@ func convertRR(grr RR) dns.RR {
 		switch v := rr.(type) {
 		case *dns.A:
 			v.A = net.ParseIP(grr.Data)
-			v.Hdr = rrHeader
 		case *dns.AAAA:
 			v.AAAA = net.ParseIP(grr.Data)
 		}

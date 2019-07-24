@@ -21,16 +21,15 @@ type geoIpRecord struct {
 
 var (
 	geoIpReader *maxminddb.Reader
-	lClient     = dns.Client{SingleInflight: true}
-	rClient     = dns.Client{SingleInflight: true}
+	Client      = dns.Client{SingleInflight: true}
 	httpClient  = &http.Client{}
 	mc          = cache.New(5*time.Minute, 10*time.Minute)
 	localDNS    = flag.String("ld", "192.168.1.1:53", "local dns")
-	remoteDNS   = flag.String("rd", "8.8.8.8:53", "remote dns")
 	ecs         = flag.String("ecs", "0.0.0.0/0", "local ip addr")
-	x           = flag.String("x", "socks5://localhost:1080", "only support `socks5` proxy")
+	x           = flag.String("x", "socks5://localhost:1080", "proxy url")
 	addr        = flag.String("l", ":5300", "listen address")
 	geoip       = flag.String("geoip", "GeoLite2-Country.mmdb", "geoip-database(https://dev.maxmind.com/geoip/geoip2/geolite2/)")
+	//remoteDNS   = flag.String("rd", "1.1.1.1:53", "remote dns")
 	//network     = *flag.String("net", "tcp", "if 'tcp' or 'tcp-tls' (DNS over TLS) a TCP query will be initiated, otherwise an UDP one")
 )
 
@@ -72,7 +71,7 @@ func handleDnsRequest(w dns.ResponseWriter, req *dns.Msg) {
 			}
 		}
 	} else {
-		resp, _, err = lClient.Exchange(req, *localDNS)
+		resp, _, err = Client.Exchange(req, *localDNS)
 	}
 	if err != nil {
 		log.Println(err, "===========>", req.Question[0].String())
@@ -81,7 +80,7 @@ func handleDnsRequest(w dns.ResponseWriter, req *dns.Msg) {
 	w.WriteMsg(resp)
 }
 func deliverAny(req *dns.Msg) (resp *dns.Msg, err error) {
-	resp, err = googleDOH.ExchangeDOH(httpClient, req, *ecs)
+	resp, _, err = Client.Exchange(req, *localDNS)
 	if err != nil {
 		return nil, err
 	}
@@ -99,19 +98,13 @@ func deliverAny(req *dns.Msg) (resp *dns.Msg, err error) {
 			break
 		}
 	}
-	if ip == nil {
-		return resp, nil
-	}
 	var record geoIpRecord
-	if geoIpReader.Lookup(ip, &record) == nil {
-		if record.Country.ISOCode == "CN" {
-			resp, _, err = lClient.Exchange(req, *localDNS)
-		} else {
-			resp, _, err = rClient.Exchange(req, *remoteDNS)
+	if ip == nil || (geoIpReader.Lookup(ip, &record) == nil && record.Country.ISOCode != "CN") {
+		resp, err = googleDOH.ExchangeDOH(httpClient, req, *ecs)
+		if err != nil {
+			return nil, err
 		}
-	}
-	if err != nil {
-		return nil, err
+
 	}
 	return resp, nil
 }
